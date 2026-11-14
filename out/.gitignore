@@ -1,0 +1,5 @@
+*.docs
+*.postings
+*.postingsIdx
+*.postingsIdxIdx
+*.urls
