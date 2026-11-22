@@ -13,6 +13,3 @@ class Posting():
     @property
     def tf(self):
         return len(self.positions)
-
-    def serialize(self):
-        pass

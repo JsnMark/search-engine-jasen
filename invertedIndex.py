@@ -22,19 +22,18 @@ from parser import extract
 ---------PSEUDO CODE---------
 // dont worry about not fitting a single file into mem
 
-partialInvertedIndex = dict()
-counter = 0
+partialInvertedIndex {}
 
 for each file:
     create a docid
-    write (docid, docname) to some idToName file
+    write docid and url to disk
     data = read(file)
     tokens = tokenize(data)
     for each token:
-        add/update posting of the file in that token's entry in the index
+        add/update posting in the posting list
+
     if partialInvertedIndex.size > max size:
         write to a file
-    counter++
 
 mergePartialInvIndexes()
 """
