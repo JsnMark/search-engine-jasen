@@ -5,7 +5,7 @@ All integers are little-endian with no padding and no compression. Strings are U
 ## .posts
 This file holds the raw bytes of the posting list. It will look like a consecutive sequence of postings. To figure out the posting list a posting belongs to, we need the .idx file.
 
-### Posting Format
+#### Posting Format
 `pos` counts token offsets within body text.
 
 ```
@@ -16,7 +16,7 @@ This file holds the raw bytes of the posting list. It will look like a consecuti
 ## .idx
 This file holds data in the format {token: posting list metadata}. The data is sorted by token, which enables the .lex binary search and .idx linear scan. Posting lists in .posts are stored in this same order. Posting list data would be stuff like the start byte offset, the total bytes the list takes up, and the amount of postings in the list. This helps us map which posting belongs to which list.
 
-### Token KV Pair format
+#### Token KV Pair format
 
 ```
 [uint32_t ] [str  ] [uint64_t    ] [uint32_t               ] [uint32_t     ]
@@ -26,7 +26,7 @@ This file holds data in the format {token: posting list metadata}. The data is s
 ## .lex
 This file acts as an index for the idx file. This file will help speed up searching in idx since we will store a list of [(tokens, .idx offsets)]. We will store every X token, always including the first token, to reduce space used so that we can load this file into memory. We will search through this with a binary search to quickly find the general location of our query token. We will seek to the offset in the idx file and do a quick linear scan of at most X tokens to find the posting list data (thus this last step is constant time).
 
-### Lexicon List format
+#### Lexicon List format
 
 ```
 [uint32_t   ]
@@ -40,7 +40,7 @@ then entry_count times:
 ## .urls
 This file holds the consecutive raw url bytes back to back.
 
-### Urls entry format
+#### Urls entry format
 
 ```
 [str]
@@ -50,7 +50,7 @@ This file holds the consecutive raw url bytes back to back.
 ## .docs
 This file holds the mapping of a docid to doc meta data like the url offset in .urls, the url length, and the document token count. These are all fixed length values, so we can easily get document i by seeking i * record length (20 bytes).
 
-### Docs entry format
+#### Docs entry format
 
 ```
 [uint32_t] [uint64_t  ] [uint32_t] [uint32_t   ]
@@ -60,14 +60,14 @@ This file holds the mapping of a docid to doc meta data like the url offset in .
 ## .pii
 This is the partial index files that will need to be merged. They will be kv pairs of tokens to postings. Entries will be guaranteed to be sorted by token.
 
-### KV Entry Format
+#### KV Entry Format
 
 ```
 [uint32_t  ] [str   ] [uint32_t      ] [uint32_t               ] [array<Postings> ]
 [token_len ] [token ] [posting_count ] [posting_list_byte_size ] [postings        ]
 ```
 
-### Posting Format (same as .posts)
+#### Posting Format (same as .posts)
 
 ```
 [uint32_t ] [uint32_t ] [uint32_t     ] [uint32_t ] [uint32_t ]
