@@ -30,6 +30,9 @@ class Posting():
         return POSTING_HEADER.size + U32.size * len(self.positions)
 
     def serialize(self):
+        """
+        Serializes posting into bytes
+        """
         n = len(self.positions)
         header = POSTING_HEADER.pack(self.did, self.title_tf, self.important_tf, n)
         return header + struct.pack(f"<{n}I", *self.positions)

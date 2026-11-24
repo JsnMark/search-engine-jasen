@@ -1,5 +1,5 @@
 import unittest
-from posting import Posting
+from search_engine.posting import Posting
 from pathlib import Path
 
 

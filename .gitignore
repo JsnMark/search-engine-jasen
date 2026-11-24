@@ -1,7 +1,6 @@
 /data
 /out
-/__pycache__
-.DS_Store
+**/.DS_Store
 /.venv
 /playground
-*/__pycache__
+**/__pycache__
