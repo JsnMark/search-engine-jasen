@@ -9,8 +9,8 @@ This file holds the raw bytes of the posting list. It will look like a consecuti
 `pos` counts token offsets within body text.
 
 ```
-[uint32_t ] [uint32_t ] [uint32_t     ] [uint32_t ] [uint32_t ]
-[docid    ] [title_tf ] [important_tf ] [n_pos    ] [pos      ] * n_pos
+[uint32_t ] [uint32_t   ] [uint32_t       ] [uint32_t ] [uint32_t ]
+[docid    ] [title_count] [important_count] [n_pos    ] [pos      ] * n_pos
 ```
 
 ## .idx
@@ -48,13 +48,13 @@ This file holds the consecutive raw url bytes back to back.
 ```
 
 ## .docs
-This file holds the mapping of a docid to doc meta data like the url offset in .urls, the url length, and the document token count. These are all fixed length values, so we can easily get document i by seeking i * record length (20 bytes).
+This file holds the mapping of a docid to doc meta data like the url offset in .urls, the url length, and the document token count. These are all fixed length values, so we can easily get document i by seeking i * record length (16 bytes).
 
 #### Docs entry format
 
 ```
-[uint32_t] [uint64_t  ] [uint32_t] [uint32_t   ]
-[docid   ] [url_offset] [url_len ] [token_count]
+[uint64_t  ] [uint32_t] [uint32_t   ]
+[url_offset] [url_len ] [token_count]
 ```
 
 ## .pii
@@ -70,12 +70,12 @@ This is the partial index files that will need to be merged. They will be kv pai
 #### Posting Format (same as .posts)
 
 ```
-[uint32_t ] [uint32_t ] [uint32_t     ] [uint32_t ] [uint32_t ]
-[docid    ] [title_tf ] [important_tf ] [n_pos    ] [pos      ] * n_pos
+[uint32_t ] [uint32_t   ] [uint32_t       ] [uint32_t ] [uint32_t ]
+[docid    ] [title_count] [important_count] [n_pos    ] [pos      ] * n_pos
 ```
 
 # Process of finding a specific posting list
 First we binary search .lex in memory to find the last entry whose token is `<=` the query, which gives us the general offset in .idx. If the query sorts before the first token in .lex, it isn't in the index. Then we do a constant time scan in .idx to find the mapping of the token to the posting list meta data. If no term is found here then we know it doesn't exist in our index. Afterwards, we have the offset to seek to the correct posting list in .posts and read the postings from there.
 
 # Process of making the inverted index
-We can write to .docs and .urls constantly, so we can keep these files open and write to them for every file we read. However, we will need to build partial index files since we don't know if a token will appear in a later document, so we can't store it all in memory. We need to temporarily save a partial index to a file and then merge at the end. These will be flushed only in between documents and never in the middle. After we build these partial indexes, we will perform a merge to produce .posts, .idx, .lex. A partial file i will store docids less than a partial file i+1. Docids are assigned in increasing order, so the merge doesn't need to re-sort them. They are also contiguous and given only to valid documents, so .docs can seek by `docid * 20`. The merge will be a k-way merge (similar to how records are merged in relational databases for queries like ORDER BY). In the end, postings inside a posting list will be sorted by docid which will help our queries later.
+We can write to .docs and .urls constantly, so we can keep these files open and write to them for every file we read. However, we will need to build partial index files since we don't know if a token will appear in a later document, so we can't store it all in memory. We need to temporarily save a partial index to a file and then merge at the end. These will be flushed only in between documents and never in the middle. After we build these partial indexes, we will perform a merge to produce .posts, .idx, .lex. A partial file i will store docids less than a partial file i+1. Docids are assigned in increasing order, so the merge doesn't need to re-sort them. They are also contiguous and given only to valid documents, so .docs can seek by `docid * 16`. The merge will be a k-way merge (similar to how records are merged in relational databases for queries like ORDER BY). In the end, postings inside a posting list will be sorted by docid which will help our queries later.

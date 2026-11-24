@@ -1,4 +1,5 @@
-/data
+/data/*
+!/data/TEST
 /out
 **/.DS_Store
 /.venv
