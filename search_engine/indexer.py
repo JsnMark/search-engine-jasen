@@ -8,6 +8,9 @@ the representation of the token's occurence in a
 document. 
 
 not allowed to use a database
+
+Assume all files are in the same format of json for now
+However json[content] seems to have different formats
 '''
 
 from pathlib import Path
@@ -39,6 +42,7 @@ class Indexer:
         self.out_name = out_name
         self.out_path = Path(OUT_ROOT_PATH) / out_name
         self.parser = parser
+        self.next_docid = 0
 
         self.logger = logging.getLogger(f"{self.__class__.__name__}")
         self.logger.info("Initialized Indexer")
@@ -48,6 +52,7 @@ class Indexer:
         Searches recursively in the path for json files
         to construct an inverted index. 
         """
+        self.next_docid = 0
 
         # Remove the out folder if it exists and make a new one
         self.remove_index()
@@ -77,26 +82,50 @@ class Indexer:
         // dont worry about not fitting a single file into mem
 
         partialInvertedIndex<Token, PostingList> {} // pii
+        postings_count = 0
 
         for each file:
-            create a docid
+            parsed = parse(file)
+            docid = next_docid++
+
+            body_tokens = tokenize(parsed.body)
             write url to .urls
-            write (docid, offset) to .docs
-            data = read(file)
-            tokens = tokenize(data)
-            for each token:
-                if token in pii:
-                    update posting list with new position
-                else:   
-                    add kv pair to pii
+            write (docid, url_offset, url_len, token_count) to .docs
+
+            for each body token, position:
+                if token not in pii or docid not in pii[token]
+                    append new posting to pii[token]
+                    posting_count++
+                append position to position list
+
+            for each important token:
+                update tf value for this docid
+            for each tilte token:
+                update tf value for this docid
+            
 
             if partialInvertedIndex.size > max size:
-                write pii to a file
+                write pii to a file sorted by token
+                pii = {}
+                postings_count = 0
+        if pii:
+            write pii to a file sorted by token
         """
-        self.logger.debug("creating partial indexes")
-        for file in self.yield_all_files(self.in_path):
 
-            break
+        urls_path = self.out_path / (self.out_name + URLS_FEXT)
+        docs_path = self.out_path / (self.out_name + DOCS_FEXT)
+        self.logger.debug(f"urls path={urls_path}, docs path={docs_path}")
+        with urls_path.open(mode="wb") as urls_file, docs_path.open(mode="wb") as docs_file:
+            for file in self.yield_all_files(self.in_path):
+                docid = self.next_docid
+                self.next_docid += 1
+                parsedDoc = self.parser.parse(file)
+
+                print(docid, parsedDoc.url, "\n", parsedDoc.title)
+                break
+            pass
+
+    def add_posting_to_partial_index(self, did: int, token: str, position: int):
         pass
 
     def merge_partial_index(self):

@@ -5,6 +5,10 @@ posting.py
 
 [uint32_t ] [uint32_t ] [uint32_t     ] [uint32_t ] [uint32_t ]
 [docid    ] [title_tf ] [important_tf ] [n_pos    ] [pos      ] * n_pos
+
+
+downside:
+    we lose position data related to title and important tokens
 """
 
 import struct
