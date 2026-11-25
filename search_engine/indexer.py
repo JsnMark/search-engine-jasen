@@ -77,6 +77,7 @@ DOCS_FEXT             = ".docs"
 MAX_POSTING_COUNT    = 350_000
 
 U32 = struct.Struct("<I")
+U64 = struct.Struct("<Q")
 
 class Indexer:
     # ------ Public ------
@@ -227,12 +228,15 @@ class Indexer:
                 
 
         
-    def merge_partial_index(self, K=128):
+    def merge_partial_index(self, K=128, interval=128):
         """
         Performs a k-way merge of all partial indexes. Don't use binary as its too slow.
         Don't merge all files at once as OS may have a limit on how many files can be opened.
         For smaller collections, we may be able to merge in 1 pass, but have code
         ensure it can work for larger collections
+
+        @param K how many files to merge in one pass
+        @param interval .lex entry for every interval'th token
         """
         """
         Pseudocode for intermediate passes
@@ -276,6 +280,9 @@ class Indexer:
             files = new_files
             if final_pass: break
         """
+        if K < 2:
+            self.logger.error("K must be >= 2")
+            raise Exception()
         
         lex = []
         posts_file = None
@@ -283,10 +290,14 @@ class Indexer:
         new_pii_file = None
         new_pii_iteration = 1
         new_pii_index = 0
+        num_tokens = 0 # used in final pass to count tokens for lex
         # filename_piiiteration_piiindex.pii, sort on int(pii_index)
         files = sorted([f for f in self.out_path.iterdir() 
                             if (f.is_file() and f.suffix == PARTIAL_FILE_FEXT)],
                         key=lambda n: int(n.stem.rsplit("_", 1)[1]))
+        if len(files) == 0:
+            self.logger.error("No partial files found")
+            raise Exception()
         
         while True:
             final_pass = len(files) <= K
@@ -321,24 +332,108 @@ class Indexer:
                     while heap and heap[0][0] == token:
                         group.append(heapq.heappop(heap))
 
+                    group_posting_count = sum(e[2] for e in group)
                     merged_pl_bytes = self.merge_posting_lists(group, batch)
                     if final_pass:
+                        if not posts_file or not idx_file:
+                            self.logger.error("No file posts or idx file")
+                            raise Exception("No file posts or idx file")
+                        
                         # write to posts
+                        posts_pos = posts_file.tell()
+                        posts_file.write(merged_pl_bytes)
                         # write to idx
+                        idx_pos = idx_file.tell()
+                        kv_bytes = self.create_idx_kv_entry(token, posts_pos, len(merged_pl_bytes), group_posting_count)
+                        idx_file.write(kv_bytes)
                         # append to lex
-                        pass
+                        if num_tokens % interval == 0:
+                            lex.append(self.create_lex_entry(token, idx_pos))
+                        num_tokens += 1
                     else:
+                        if new_pii_file is None:
+                            self.logger.error("Pii file not found")
+                            raise Exception("Pii file not found")
                         # write to pii
-                        pass
-                    
-                    for _, idx, pl_count, pl_byte_len in group:
-                        pass
+                        pii_entry = self.create_pii_merged_bytes(token, group_posting_count, merged_pl_bytes)
+                        new_pii_file.write(pii_entry)
+
+                    # repopulate heap with the items from the files the token was in
+                    for _, idx, _, _ in group:
+                        current_file = batch[idx]
+                        rth_tuple = self.read_token_header(current_file)
+                        if rth_tuple is None:
+                            continue
+                        current_token, pl_count, pl_byte_len = rth_tuple
+                        heapq.heappush(heap, (current_token, idx, pl_count, pl_byte_len))
+                if final_pass:
+                    if not posts_file or not idx_file:
+                        self.logger.error("Cant find posts or idx file")
+                        raise Exception
+                    posts_file.close()
+                    idx_file.close()
+                    self.write_lex(lex)
+                else:
+                    if not new_pii_file:
+                        self.logger.error("Cant find new pii file")
+                        raise Exception
+                    new_pii_file.close()
+                    new_files.append(Path(new_pii_file.name))
+                for batch_file in batch:
+                    batch_file.close()
+                    Path(batch_file.name).unlink(missing_ok=True)
                     
             files = new_files
             if final_pass:
                 break
             new_pii_iteration += 1
             new_pii_index = 0
+
+    def write_lex(self, lex):
+        with (self.out_path / (self.out_name + LEXICON_FEXT)).open("wb") as lex_file:
+            lex_file.write(U32.pack(len(lex)))
+            for entry in lex:
+                lex_file.write(entry)
+
+    def create_pii_merged_bytes(self, token: str, posting_count: int, posting_list_bytes):
+        """
+        [uint32_t  ] [str   ] [uint32_t      ] [uint32_t               ] [array<Postings> ]
+        [token_len ] [token ] [posting_count ] [posting_list_byte_size ] [postings        ]
+        """
+        byte_result = bytearray()
+        token_bytes = token.encode("utf-8")
+        byte_result += U32.pack(len(token_bytes))
+        byte_result += token_bytes
+        byte_result += U32.pack(posting_count)
+        byte_result += U32.pack(len(posting_list_bytes))
+        byte_result += posting_list_bytes
+        return byte_result
+
+
+    def create_idx_kv_entry(self, token: str, posts_offset: int, pl_byte_size: int, posting_count: int):
+        """
+        [uint32_t ] [str  ] [uint64_t    ] [uint32_t               ] [uint32_t     ]
+        [token_len] [token] [posts_offset] [posting_list_byte_size ] [posting_count]
+        """
+        byte_result = bytearray()
+        token_bytes = token.encode("utf-8")
+        byte_result += U32.pack(len(token_bytes))
+        byte_result += token_bytes
+        byte_result += U64.pack(posts_offset)
+        byte_result += U32.pack(pl_byte_size)
+        byte_result += U32.pack(posting_count)
+        return byte_result
+
+    def create_lex_entry(self, token: str, idx_offset):
+        byte_result = bytearray()
+        token_bytes = token.encode("utf-8")
+        byte_result += U32.pack(len(token_bytes))
+        byte_result += token_bytes
+        byte_result += U64.pack(idx_offset)
+        return byte_result
+
+
+    
     def merge_posting_lists(self, group, batch):
         """
         Returns the byte object of the merged
