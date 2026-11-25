@@ -54,6 +54,7 @@ import shutil
 import logging
 from collections import Counter
 import struct
+import time
 
 import pprint
 
@@ -126,7 +127,10 @@ class Indexer:
 
         urls_path = self.out_path / (self.out_name + URLS_FEXT)
         docs_path = self.out_path / (self.out_name + DOCS_FEXT)
-        self.logger.debug(f"urls path={urls_path}, docs path={docs_path}")
+        total_doc_count = 0
+        total_postings_count = 0
+        self.logger.debug(f"Creating partial indexes")
+        start_time = time.time()
 
         with urls_path.open(mode="wb") as urls_file, docs_path.open(mode="wb") as docs_file:
             self.doc_table_writer = DocTableWriter(docs_file, urls_file) # write to .docs and .urls
@@ -142,14 +146,22 @@ class Indexer:
 
                 # rough approximation for memory
                 if self.posting_count >= MAX_POSTINGS_COUNT:
+                    total_postings_count += self.posting_count
                     self.save_current_pii()
-                # Debug limit by postings
-                c -= 1
-                if c <= 0:
-                    break
+                total_doc_count += 1
+
+                # # Debug limit by postings
+                # c -= 1
+                # if c <= 0:
+                #     break
+
             # Save pii after iterating through all files
             if self.pii:
+                total_postings_count += self.posting_count
                 self.save_current_pii()
+                
+        end_time = time.time() - start_time
+        self.logger.debug(f"Finished creating partial indexes for {total_doc_count} documents with {total_postings_count} postings in {end_time} seconds")
             
 
     def add_tokens_to_partial_index(self, tokens, did) -> int:
@@ -209,8 +221,6 @@ class Indexer:
                 
 
         
-
-
     def merge_partial_index(self):
         pass
 
