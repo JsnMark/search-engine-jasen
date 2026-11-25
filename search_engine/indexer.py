@@ -53,6 +53,7 @@ from pathlib import Path
 import shutil
 import logging
 from collections import Counter
+import struct
 
 import pprint
 
@@ -78,6 +79,7 @@ class Indexer:
     def __init__(self, in_path: str, out_name: str, parser: DocumentParser):
         # map<string, list<posting>> 
         self.pii = dict() # maps tokens to lists of postings in the partial inverted index
+        self.next_pii = 0 # next .pii id
         self.in_path = Path(in_path)
         self.out_name = out_name
         self.out_path = Path(OUT_ROOT_PATH) / out_name
@@ -127,7 +129,8 @@ class Indexer:
         self.logger.debug(f"urls path={urls_path}, docs path={docs_path}")
 
         with urls_path.open(mode="wb") as urls_file, docs_path.open(mode="wb") as docs_file:
-            self.doc_table_writer = DocTableWriter(docs_file, urls_file)
+            self.doc_table_writer = DocTableWriter(docs_file, urls_file) # write to .docs and .urls
+            c = 1 # TODO REMOVE THIS
             for file in self.yield_all_files(self.in_path):
                 parsedDoc = self.parser.parse(file)
                 docid = self.next_docid
@@ -136,15 +139,17 @@ class Indexer:
                 self.doc_table_writer.write(parsedDoc.url, num_tokens)
                 self.update_title_count(tokenize(parsedDoc.title), docid)
                 self.update_important_count(tokenize(parsedDoc.important), docid)
-                
 
-                ### TODO over here
-                print(docid, parsedDoc.url, "\n", parsedDoc.title)
-                print()
-                pprint.pprint(self.pii)
-                print()
-                print()
-                break
+                # rough approximation for memory
+                if self.posting_count >= MAX_POSTINGS_COUNT:
+                    self.save_current_pii()
+                # Debug limit by postings
+                c -= 1
+                if c <= 0:
+                    break
+            # Save pii after iterating through all files
+            if self.pii:
+                self.save_current_pii()
             
 
     def add_tokens_to_partial_index(self, tokens, did) -> int:
@@ -174,6 +179,36 @@ class Indexer:
             posting_list = self.pii.get(token)
             if posting_list and posting_list[-1].did == docid:
                 posting_list[-1].important_count = count
+
+    def save_current_pii(self):
+        """
+        Saves the current partial index into a .pii
+
+        KV Entry Format
+        [uint32_t  ] [str   ] [uint32_t      ] [uint32_t               ] [array<Postings> ]
+        [token_len ] [token ] [posting_count ] [posting_list_byte_size ] [postings        ]
+        """
+        pii_id = self.next_pii
+        self.next_pii += 1
+        pii_filepath = Path(self.out_path) / (self.out_name + "_" + str(pii_id) + PARTIAL_FILE_FEXT)
+
+        with pii_filepath.open(mode="wb") as pii_file:
+            for token in sorted(self.pii):
+                token_bytes = token.encode("utf-8")
+                token_data = struct.pack("<I",len(token_bytes)) + token_bytes
+                # Get postings bytes to make postings metadata
+                posting_list = self.pii[token]
+                postings_data = b"".join(p.serialize() for p in posting_list)
+                postings_metadata = struct.pack("<II", len(posting_list), len(postings_data))
+                pii_file.write(
+                    token_data + postings_metadata + postings_data
+                )
+
+        self.pii = {}
+        self.posting_count = 0
+                
+
+        
 
 
     def merge_partial_index(self):
