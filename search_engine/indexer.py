@@ -19,7 +19,7 @@ However json[content] seems to have different formats
 // dont worry about not fitting a single file into mem
 
 partialInvertedIndex<Token, PostingList> {} // pii
-postings_count = 0
+posting_count = 0
 
 for each file:
     parsed = parse(file)
@@ -44,7 +44,7 @@ for each file:
     if partialInvertedIndex.size > max size:
         write pii to a file sorted by token
         pii = {}
-        postings_count = 0
+        posting_count = 0
 if pii:
     write pii to a file sorted by token
 """
@@ -55,6 +55,7 @@ import logging
 from collections import Counter
 import struct
 import time
+import heapq
 
 import pprint
 
@@ -73,7 +74,9 @@ INDEX_FEXT            = ".idx"
 LEXICON_FEXT          = ".lex"
 URLS_FEXT             = ".urls"
 DOCS_FEXT             = ".docs"
-MAX_POSTINGS_COUNT    = 35_000
+MAX_POSTING_COUNT    = 350_000
+
+U32 = struct.Struct("<I")
 
 class Indexer:
     # ------ Public ------
@@ -128,7 +131,7 @@ class Indexer:
         urls_path = self.out_path / (self.out_name + URLS_FEXT)
         docs_path = self.out_path / (self.out_name + DOCS_FEXT)
         total_doc_count = 0
-        total_postings_count = 0
+        total_posting_count = 0
         self.logger.debug(f"Creating partial indexes")
         start_time = time.time()
 
@@ -145,8 +148,8 @@ class Indexer:
                 self.update_important_count(tokenize(parsedDoc.important), docid)
 
                 # rough approximation for memory
-                if self.posting_count >= MAX_POSTINGS_COUNT:
-                    total_postings_count += self.posting_count
+                if self.posting_count >= MAX_POSTING_COUNT:
+                    total_posting_count += self.posting_count
                     self.save_current_pii()
                 total_doc_count += 1
 
@@ -157,11 +160,11 @@ class Indexer:
 
             # Save pii after iterating through all files
             if self.pii:
-                total_postings_count += self.posting_count
+                total_posting_count += self.posting_count
                 self.save_current_pii()
                 
         end_time = time.time() - start_time
-        self.logger.debug(f"Finished creating partial indexes for {total_doc_count} documents with {total_postings_count} postings in {end_time} seconds")
+        self.logger.info(f"Finished creating {self.next_pii} partial indexes for {total_doc_count} documents with {total_posting_count} postings in {end_time:.6f} seconds")
             
 
     def add_tokens_to_partial_index(self, tokens, did) -> int:
@@ -195,6 +198,9 @@ class Indexer:
     def save_current_pii(self):
         """
         Saves the current partial index into a .pii
+        filename_piiiteration_piiindex.pii
+        piiiteration will always be 0 here since its the first one
+
 
         KV Entry Format
         [uint32_t  ] [str   ] [uint32_t      ] [uint32_t               ] [array<Postings> ]
@@ -202,7 +208,7 @@ class Indexer:
         """
         pii_id = self.next_pii
         self.next_pii += 1
-        pii_filepath = Path(self.out_path) / (self.out_name + "_" + str(pii_id) + PARTIAL_FILE_FEXT)
+        pii_filepath = Path(self.out_path) / (self.out_name + "_0_" + str(pii_id) + PARTIAL_FILE_FEXT)
 
         with pii_filepath.open(mode="wb") as pii_file:
             for token in sorted(self.pii):
@@ -221,8 +227,160 @@ class Indexer:
                 
 
         
-    def merge_partial_index(self):
-        pass
+    def merge_partial_index(self, K=128):
+        """
+        Performs a k-way merge of all partial indexes. Don't use binary as its too slow.
+        Don't merge all files at once as OS may have a limit on how many files can be opened.
+        For smaller collections, we may be able to merge in 1 pass, but have code
+        ensure it can work for larger collections
+        """
+        """
+        Pseudocode for intermediate passes
+
+        files = sorted partial files (by pii id)
+        lex = [] # in memory
+        while 1:
+            final_pass = len(files) <= K
+            new_files = []
+            while files:
+                batch = pop first K from files
+                if len(batch) == 1 and not final_pass:
+                    new_files.append(batch[0])
+                    continue
+                if final_pass open .posts and .idx
+                else open new .pii
+
+                heap = [(header.token, i, header) for i, f in batch if f has an entry]
+                while heap:
+                    tok = heap.min.token
+                    group = []
+                    while heap and heap.min.token == tok:
+                        group.append(pop(heap))        # ascending file idx
+                    if final_pass:
+                        write merged postings to .posts
+                        write to .idx
+                        lex.append(lex item)
+                    else:
+                        write merged pii item to .pii
+
+                    for item in group:            
+                        if batch[item index] has next header: 
+                            push new item to heap
+                
+                if final_pass:
+                    write lex count and lex to .lex
+                else:
+                    new_files.append(new .pii)
+                close files 
+                delete batch files
+            files = new_files
+            if final_pass: break
+        """
+        
+        lex = []
+        posts_file = None
+        idx_file = None
+        new_pii_file = None
+        new_pii_iteration = 1
+        new_pii_index = 0
+        # filename_piiiteration_piiindex.pii, sort on int(pii_index)
+        files = sorted([f for f in self.out_path.iterdir() 
+                            if (f.is_file() and f.suffix == PARTIAL_FILE_FEXT)],
+                        key=lambda n: int(n.stem.rsplit("_", 1)[1]))
+        
+        while True:
+            final_pass = len(files) <= K
+            new_files = []
+            while files:
+                # If only 1 file in the batch in an intermediate pass, 
+                #   dont waste time copying it
+                batch = files[:K] # temporarily a list of paths
+                files = files[K:]
+                if len(batch) == 1 and not final_pass:
+                    new_name_str =  f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}"
+                    new_files.append(batch[0].rename(batch[0].with_name(new_name_str)))
+                    new_pii_index += 1
+                    continue
+                batch = [f.open(mode="rb") for f in batch] # list of open files
+
+                if final_pass:
+                    posts_file = (self.out_path / (self.out_name + POSTING_LIST_FEXT)).open(mode="wb")
+                    idx_file = (self.out_path / (self.out_name + INDEX_FEXT)).open(mode="wb")
+                    self.logger.debug(f"Opened {posts_file.name}")
+                    self.logger.debug(f"Opened {idx_file.name}")
+                else:
+                    new_pii_file = (self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}").open(mode="wb")
+                    new_pii_index += 1
+                    self.logger.debug(f"Opened {new_pii_file.name}")
+
+                # heap<tuple<token, batch_idx, pl_count, pl_byte_len>>
+                heap = self.build_token_heap(batch)
+                while heap:
+                    token = heap[0][0]
+                    group = []
+                    while heap and heap[0][0] == token:
+                        group.append(heapq.heappop(heap))
+
+                    merged_pl_bytes = self.merge_posting_lists(group, batch)
+                    if final_pass:
+                        # write to posts
+                        # write to idx
+                        # append to lex
+                        pass
+                    else:
+                        # write to pii
+                        pass
+                    
+                    for _, idx, pl_count, pl_byte_len in group:
+                        pass
+                    
+            files = new_files
+            if final_pass:
+                break
+            new_pii_iteration += 1
+            new_pii_index = 0
+    def merge_posting_lists(self, group, batch):
+        """
+        Returns the byte object of the merged
+        posting lists from the files
+
+        @param group list<tuple<token, batch_idx, pl_count, pl_byte_len>>
+        @param batch list<files>
+        """
+        byte_result = bytearray()
+        for _, index, _, pl_byte_len in group:
+            file = batch[index]
+            byte_result += file.read(pl_byte_len) # guaranteed to not fail since we made the file
+        return byte_result
+
+    def read_token_header(self, file):
+        """
+        Reads the token header in a partial index file.
+        Assumes first byte at cursor is the token byte length
+        returns None if token byte length is 0 or EOF
+        else returns (token, posting_count, byte_len)
+        """
+        b = file.read(U32.size)
+        if len(b) < U32.size:
+            return None
+        token_byte_len, = U32.unpack(b)
+        if token_byte_len == 0:
+            return None
+        token = file.read(token_byte_len).decode("utf-8")
+        pl_posting_count, pl_byte_len = struct.unpack("<II", file.read(8))
+        # file now points at posting bytes, need to read pl_byte_len later
+        return token, pl_posting_count, pl_byte_len 
+
+    def build_token_heap(self, batch):
+        heap = []
+        for idx, file in enumerate(batch):
+            rth_tuple = self.read_token_header(file)
+            if rth_tuple is None:
+                continue
+            token, pl_count, pl_byte_len = rth_tuple
+            heap.append((token, idx, pl_count, pl_byte_len))
+        heapq.heapify(heap) # ordered by (token,idx). No cases where other tuple elements matter
+        return heap
 
     def yield_all_files(self, path: Path):
         for item in path.rglob("*.json"):
