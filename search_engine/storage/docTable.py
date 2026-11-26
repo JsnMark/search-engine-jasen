@@ -31,3 +31,7 @@ class DocTableWriter:
         self.urls_file.write(url_bytes)
         self.docs_file.write(DOC_RECORD.pack(self.url_offset, len(url_bytes), token_count))
         self.url_offset += len(url_bytes)
+
+# TODO
+class DocTableReader:
+    pass

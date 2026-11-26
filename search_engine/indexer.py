@@ -13,42 +13,6 @@ Assume all files are in the same format of json for now
 However json[content] seems to have different formats
 '''
 
-
-"""
----------PARTIAL INV INDEX PSEUDO CODE---------
-// dont worry about not fitting a single file into mem
-
-partialInvertedIndex<Token, PostingList> {} // pii
-posting_count = 0
-
-for each file:
-    parsed = parse(file)
-    docid = next_docid++
-
-    body_tokens = tokenize(parsed.body)
-    write url to .urls
-    write (docid, url_offset, url_len, token_count) to .docs
-
-    for each body token, position:
-        if token not in pii or docid not in pii[token]
-            append new posting to pii[token]
-            posting_count++
-        append position to position list
-
-    for each important token:
-        update tf value for this docid
-    for each tilte token:
-        update tf value for this docid
-    
-
-    if partialInvertedIndex.size > max size:
-        write pii to a file sorted by token
-        pii = {}
-        posting_count = 0
-if pii:
-    write pii to a file sorted by token
-"""
-
 from pathlib import Path
 import shutil
 import logging
@@ -57,13 +21,12 @@ import struct
 import time
 import heapq
 
-import pprint
-
 from search_engine.posting import Posting
 from search_engine.tokenizer import tokenize
 from search_engine.parsers.base import DocumentParser, ParsedDocument
-from search_engine.docTable import DocTableWriter
+from search_engine.storage.docTable import DocTableWriter
 from search_engine.tf_idf import term_freq, doc_freq, norm
+from search_engine.storage.partial import PiiWriter
 
 
 
@@ -138,7 +101,7 @@ class Indexer:
 
         with urls_path.open(mode="wb") as urls_file, docs_path.open(mode="wb") as docs_file:
             self.doc_table_writer = DocTableWriter(docs_file, urls_file) # write to .docs and .urls
-            c = 1 # TODO REMOVE THIS
+            c = 1 # debug limiter count
             for file in self.yield_all_files(self.in_path):
                 parsedDoc = self.parser.parse(file)
                 docid = self.next_docid
@@ -210,18 +173,9 @@ class Indexer:
         pii_id = self.next_pii
         self.next_pii += 1
         pii_filepath = Path(self.out_path) / (self.out_name + "_0_" + str(pii_id) + PARTIAL_FILE_FEXT)
-
-        with pii_filepath.open(mode="wb") as pii_file:
+        with PiiWriter.open(pii_filepath) as piiWriter:
             for token in sorted(self.pii):
-                token_bytes = token.encode("utf-8")
-                token_data = struct.pack("<I",len(token_bytes)) + token_bytes
-                # Get postings bytes to make postings metadata
-                posting_list = self.pii[token]
-                postings_data = b"".join(p.serialize() for p in posting_list)
-                postings_metadata = struct.pack("<II", len(posting_list), len(postings_data))
-                pii_file.write(
-                    token_data + postings_metadata + postings_data
-                )
+                piiWriter.write_postings(token, self.pii[token])
 
         self.pii = {}
         self.posting_count = 0
@@ -238,56 +192,15 @@ class Indexer:
         @param K how many files to merge in one pass
         @param interval .lex entry for every interval'th token
         """
-        """
-        Pseudocode for intermediate passes
-
-        files = sorted partial files (by pii id)
-        lex = [] # in memory
-        while 1:
-            final_pass = len(files) <= K
-            new_files = []
-            while files:
-                batch = pop first K from files
-                if len(batch) == 1 and not final_pass:
-                    new_files.append(batch[0])
-                    continue
-                if final_pass open .posts and .idx
-                else open new .pii
-
-                heap = [(header.token, i, header) for i, f in batch if f has an entry]
-                while heap:
-                    tok = heap.min.token
-                    group = []
-                    while heap and heap.min.token == tok:
-                        group.append(pop(heap))        # ascending file idx
-                    if final_pass:
-                        write merged postings to .posts
-                        write to .idx
-                        lex.append(lex item)
-                    else:
-                        write merged pii item to .pii
-
-                    for item in group:            
-                        if batch[item index] has next header: 
-                            push new item to heap
-                
-                if final_pass:
-                    write lex count and lex to .lex
-                else:
-                    new_files.append(new .pii)
-                close files 
-                delete batch files
-            files = new_files
-            if final_pass: break
-        """
         if K < 2:
             self.logger.error("K must be >= 2")
             raise Exception()
+        start_time = time.time()
         
         lex = []
         posts_file = None
         idx_file = None
-        new_pii_file = None
+        piiWriter = None
         new_pii_iteration = 1
         new_pii_index = 0
         num_tokens = 0 # used in final pass to count tokens for lex
@@ -320,9 +233,9 @@ class Indexer:
                     self.logger.debug(f"Opened {posts_file.name}")
                     self.logger.debug(f"Opened {idx_file.name}")
                 else:
-                    new_pii_file = (self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}").open(mode="wb")
+                    piiWriter = PiiWriter.open(self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}")
                     new_pii_index += 1
-                    self.logger.debug(f"Opened {new_pii_file.name}")
+                    self.logger.debug(f"Opened {piiWriter.file_name}")
 
                 # heap<tuple<token, batch_idx, pl_count, pl_byte_len>>
                 heap = self.build_token_heap(batch)
@@ -351,12 +264,11 @@ class Indexer:
                             lex.append(self.create_lex_entry(token, idx_pos))
                         num_tokens += 1
                     else:
-                        if new_pii_file is None:
-                            self.logger.error("Pii file not found")
-                            raise Exception("Pii file not found")
+                        if piiWriter is None:
+                            self.logger.error("pii writer is none")
+                            raise ValueError("pii writer is none")
                         # write to pii
-                        pii_entry = self.create_pii_merged_bytes(token, group_posting_count, merged_pl_bytes)
-                        new_pii_file.write(pii_entry)
+                        piiWriter.write_raw(token, group_posting_count, merged_pl_bytes)
 
                     # repopulate heap with the items from the files the token was in
                     for _, idx, _, _ in group:
@@ -374,11 +286,11 @@ class Indexer:
                     idx_file.close()
                     self.write_lex(lex)
                 else:
-                    if not new_pii_file:
-                        self.logger.error("Cant find new pii file")
-                        raise Exception
-                    new_pii_file.close()
-                    new_files.append(Path(new_pii_file.name))
+                    if not piiWriter:
+                        self.logger.error("pii writer dne")
+                        raise ValueError("pii writer dne")
+                    piiWriter.close()
+                    new_files.append(Path(piiWriter.file_name))
                 for batch_file in batch:
                     batch_file.close()
                     Path(batch_file.name).unlink(missing_ok=True)
@@ -388,26 +300,14 @@ class Indexer:
                 break
             new_pii_iteration += 1
             new_pii_index = 0
+        end_time = time.time() - start_time
+        self.logger.info(f"Merged partial indexes in {end_time:.4f} seconds")
 
     def write_lex(self, lex):
         with (self.out_path / (self.out_name + LEXICON_FEXT)).open("wb") as lex_file:
             lex_file.write(U32.pack(len(lex)))
             for entry in lex:
                 lex_file.write(entry)
-
-    def create_pii_merged_bytes(self, token: str, posting_count: int, posting_list_bytes):
-        """
-        [uint32_t  ] [str   ] [uint32_t      ] [uint32_t               ] [array<Postings> ]
-        [token_len ] [token ] [posting_count ] [posting_list_byte_size ] [postings        ]
-        """
-        byte_result = bytearray()
-        token_bytes = token.encode("utf-8")
-        byte_result += U32.pack(len(token_bytes))
-        byte_result += token_bytes
-        byte_result += U32.pack(posting_count)
-        byte_result += U32.pack(len(posting_list_bytes))
-        byte_result += posting_list_bytes
-        return byte_result
 
 
     def create_idx_kv_entry(self, token: str, posts_offset: int, pl_byte_size: int, posting_count: int):
