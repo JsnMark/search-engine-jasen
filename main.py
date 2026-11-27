@@ -1,6 +1,8 @@
 import logging
 import sys
+import time
 from search_engine.indexer import Indexer
+from search_engine.searchEngines.simpleEngine import SimpleEngine
 from search_engine.parsers.json_parser import JSONDocumentParser
 import argparse
 
@@ -17,6 +19,7 @@ if __name__ == "__main__":
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s.%(funcName)s: %(message)s",
     )
+    logger = logging.getLogger()
 
     parser = argparse.ArgumentParser(description="Index files and run queries")
     parser.add_argument(
@@ -41,3 +44,22 @@ if __name__ == "__main__":
         ixr.create_index()
 
     # TODO: search
+    searchEngine = SimpleEngine(args.out_name)
+    COMMANDS = ["query", "exit"]
+    while True:
+        command = input(f'Enter command: "query" or "exit"\n>> ')
+        if command not in COMMANDS:
+            print(f"Invalid command: {command}")
+            continue
+        if command == "exit":
+            break
+        query = input('Type your query\n>> ')
+
+        start_time = time.time()
+        query_out = searchEngine.search(query)
+        query_time = time.time() - start_time
+        logger.debug(f"Finished query in {query_time:.5f} seconds")
+
+        for o in query_out:
+            print(o)
+        print()

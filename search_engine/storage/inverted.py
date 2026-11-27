@@ -91,5 +91,5 @@ class InvIndexWriter(_Owned):
 
 
 
-class InvIndexReader:
+class InvIndexReader(_Owned):
     pass
