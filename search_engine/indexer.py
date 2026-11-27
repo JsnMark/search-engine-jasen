@@ -23,9 +23,8 @@ import itertools
 
 from search_engine.posting import Posting
 from search_engine.tokenizer import tokenize
-from search_engine.parsers.base import DocumentParser, ParsedDocument
+from search_engine.parsers.base import DocumentParser
 from search_engine.storage.docTable import DocTableWriter
-from search_engine.tf_idf import term_freq, doc_freq, norm
 from search_engine.storage.partial import PiiWriter, PiiReader
 from search_engine.storage.inverted import InvIndexWriter
 
