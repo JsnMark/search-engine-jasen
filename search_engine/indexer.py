@@ -17,7 +17,6 @@ from pathlib import Path
 import shutil
 import logging
 from collections import Counter
-import struct
 import time
 import heapq
 import itertools
@@ -28,20 +27,16 @@ from search_engine.parsers.base import DocumentParser, ParsedDocument
 from search_engine.storage.docTable import DocTableWriter
 from search_engine.tf_idf import term_freq, doc_freq, norm
 from search_engine.storage.partial import PiiWriter, PiiReader
+from search_engine.storage.inverted import InvIndexWriter
 
 
 
 OUT_ROOT_PATH         = "out"
 PARTIAL_FILE_FEXT     = ".pii" #pii files are named FileName_piiNum.pii
-POSTING_LIST_FEXT     = ".posts"
-INDEX_FEXT            = ".idx" 
-LEXICON_FEXT          = ".lex"
 URLS_FEXT             = ".urls"
 DOCS_FEXT             = ".docs"
 MAX_POSTING_COUNT     = 350_000
 
-U32 = struct.Struct("<I")
-U64 = struct.Struct("<Q")
 
 class Indexer:
     # ------ Public ------
@@ -198,14 +193,12 @@ class Indexer:
             raise Exception()
         start_time = time.time()
         
-        lex = []
-        posts_file = None
-        idx_file = None
         piiFileName = ""
         piiWriter = None
         new_pii_iteration = 1
         new_pii_index = 0
-        num_tokens = 0 # used in final pass to count tokens for lex
+        invIndexWriter = None
+
         # filename_piiiteration_piiindex.pii, sort on int(pii_index)
         files = sorted([f for f in self.out_path.iterdir() 
                             if (f.is_file() and f.suffix == PARTIAL_FILE_FEXT)],
@@ -231,10 +224,10 @@ class Indexer:
                 reader_batch = [PiiReader(f) for f in batch] # list of PiiReaders for the batch
 
                 if final_pass:
-                    posts_file = (self.out_path / (self.out_name + POSTING_LIST_FEXT)).open(mode="wb")
-                    idx_file = (self.out_path / (self.out_name + INDEX_FEXT)).open(mode="wb")
-                    self.logger.debug(f"Opened {posts_file.name}")
-                    self.logger.debug(f"Opened {idx_file.name}")
+                    invIndexWriter = InvIndexWriter.open(self.out_path, self.out_name, interval)       
+                    self.logger.debug(f"Opened {invIndexWriter.posts_file_name or "<stream>"}")
+                    self.logger.debug(f"Opened {invIndexWriter.idx_file_name or "<stream>"}")
+                    self.logger.debug(f"Opened {invIndexWriter.lex_file_name or "<stream>"}")
                 else:
                     piiFileName = self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}"
                     piiWriter = PiiWriter.open(piiFileName)
@@ -249,21 +242,12 @@ class Indexer:
                     group_posting_count = sum(e.count for e in group)
                     merged_pl_bytes = b"".join(e.postings_data for e in group)
                     if final_pass:
-                        if not posts_file or not idx_file:
-                            self.logger.error("No file posts or idx file")
-                            raise Exception("No file posts or idx file")
-                        
-                        # write to posts
-                        posts_pos = posts_file.tell()
-                        posts_file.write(merged_pl_bytes)
-                        # write to idx
-                        idx_pos = idx_file.tell()
-                        kv_bytes = self.create_idx_kv_entry(token, posts_pos, len(merged_pl_bytes), group_posting_count)
-                        idx_file.write(kv_bytes)
-                        # append to lex
-                        if num_tokens % interval == 0:
-                            lex.append(self.create_lex_entry(token, idx_pos))
-                        num_tokens += 1
+                        if invIndexWriter is None:
+                            self.logger.error("invIndex writer is none")
+                            raise ValueError("invIndex writer is none")
+                        # write to .posts, .idx, and to in mem lex
+                        invIndexWriter.write(token, group_posting_count, merged_pl_bytes)
+
                     else:
                         if piiWriter is None:
                             self.logger.error("pii writer is none")
@@ -272,12 +256,10 @@ class Indexer:
                         piiWriter.write_raw(token, group_posting_count, merged_pl_bytes)
 
                 if final_pass:
-                    if not posts_file or not idx_file:
-                        self.logger.error("Cant find posts or idx file")
-                        raise Exception
-                    posts_file.close()
-                    idx_file.close()
-                    self.write_lex(lex)
+                    if not invIndexWriter:
+                        self.logger.error("invIndex writer is none")
+                        raise ValueError("invIndex writer is none")
+                    invIndexWriter.close()
                 else:
                     if not piiWriter:
                         self.logger.error("pii writer dne")
@@ -296,34 +278,6 @@ class Indexer:
         end_time = time.time() - start_time
         self.logger.info(f"Merged partial indexes in {end_time:.4f} seconds")
 
-    def write_lex(self, lex):
-        with (self.out_path / (self.out_name + LEXICON_FEXT)).open("wb") as lex_file:
-            lex_file.write(U32.pack(len(lex)))
-            for entry in lex:
-                lex_file.write(entry)
-
-
-    def create_idx_kv_entry(self, token: str, posts_offset: int, pl_byte_size: int, posting_count: int):
-        """
-        [uint32_t ] [str  ] [uint64_t    ] [uint32_t               ] [uint32_t     ]
-        [token_len] [token] [posts_offset] [posting_list_byte_size ] [posting_count]
-        """
-        byte_result = bytearray()
-        token_bytes = token.encode("utf-8")
-        byte_result += U32.pack(len(token_bytes))
-        byte_result += token_bytes
-        byte_result += U64.pack(posts_offset)
-        byte_result += U32.pack(pl_byte_size)
-        byte_result += U32.pack(posting_count)
-        return byte_result
-
-    def create_lex_entry(self, token: str, idx_offset):
-        byte_result = bytearray()
-        token_bytes = token.encode("utf-8")
-        byte_result += U32.pack(len(token_bytes))
-        byte_result += token_bytes
-        byte_result += U64.pack(idx_offset)
-        return byte_result
 
     def yield_all_files(self, path: Path):
         for item in path.rglob("*.json"):
