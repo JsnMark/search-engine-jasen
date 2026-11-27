@@ -20,24 +20,25 @@ from collections import Counter
 import struct
 import time
 import heapq
+import itertools
 
 from search_engine.posting import Posting
 from search_engine.tokenizer import tokenize
 from search_engine.parsers.base import DocumentParser, ParsedDocument
 from search_engine.storage.docTable import DocTableWriter
 from search_engine.tf_idf import term_freq, doc_freq, norm
-from search_engine.storage.partial import PiiWriter
+from search_engine.storage.partial import PiiWriter, PiiReader
 
 
 
-OUT_ROOT_PATH = "out"
+OUT_ROOT_PATH         = "out"
 PARTIAL_FILE_FEXT     = ".pii" #pii files are named FileName_piiNum.pii
 POSTING_LIST_FEXT     = ".posts"
 INDEX_FEXT            = ".idx" 
 LEXICON_FEXT          = ".lex"
 URLS_FEXT             = ".urls"
 DOCS_FEXT             = ".docs"
-MAX_POSTING_COUNT    = 350_000
+MAX_POSTING_COUNT     = 350_000
 
 U32 = struct.Struct("<I")
 U64 = struct.Struct("<Q")
@@ -200,6 +201,7 @@ class Indexer:
         lex = []
         posts_file = None
         idx_file = None
+        piiFileName = ""
         piiWriter = None
         new_pii_iteration = 1
         new_pii_index = 0
@@ -226,6 +228,7 @@ class Indexer:
                     new_pii_index += 1
                     continue
                 batch = [f.open(mode="rb") for f in batch] # list of open files
+                reader_batch = [PiiReader(f) for f in batch] # list of PiiReaders for the batch
 
                 if final_pass:
                     posts_file = (self.out_path / (self.out_name + POSTING_LIST_FEXT)).open(mode="wb")
@@ -233,20 +236,18 @@ class Indexer:
                     self.logger.debug(f"Opened {posts_file.name}")
                     self.logger.debug(f"Opened {idx_file.name}")
                 else:
-                    piiWriter = PiiWriter.open(self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}")
+                    piiFileName = self.out_path / f"{self.out_name}_{new_pii_iteration}_{new_pii_index}{PARTIAL_FILE_FEXT}"
+                    piiWriter = PiiWriter.open(piiFileName)
                     new_pii_index += 1
                     self.logger.debug(f"Opened {piiWriter.file_name}")
 
-                # heap<tuple<token, batch_idx, pl_count, pl_byte_len>>
-                heap = self.build_token_heap(batch)
-                while heap:
-                    token = heap[0][0]
-                    group = []
-                    while heap and heap[0][0] == token:
-                        group.append(heapq.heappop(heap))
-
-                    group_posting_count = sum(e[2] for e in group)
-                    merged_pl_bytes = self.merge_posting_lists(group, batch)
+                # Acts as a min heap of all the readers's next token
+                # all pii files already sorted by token, merge holds heap of next token per reader
+                merged_gen = heapq.merge(*reader_batch, key=lambda e: e.token) # lazy evaluate heap, automatically repopulate heap
+                for token, group in itertools.groupby(merged_gen, key=lambda e: e.token): # 
+                    group = list(group) # Force the group to populate here
+                    group_posting_count = sum(e.count for e in group)
+                    merged_pl_bytes = b"".join(e.postings_data for e in group)
                     if final_pass:
                         if not posts_file or not idx_file:
                             self.logger.error("No file posts or idx file")
@@ -270,14 +271,6 @@ class Indexer:
                         # write to pii
                         piiWriter.write_raw(token, group_posting_count, merged_pl_bytes)
 
-                    # repopulate heap with the items from the files the token was in
-                    for _, idx, _, _ in group:
-                        current_file = batch[idx]
-                        rth_tuple = self.read_token_header(current_file)
-                        if rth_tuple is None:
-                            continue
-                        current_token, pl_count, pl_byte_len = rth_tuple
-                        heapq.heappush(heap, (current_token, idx, pl_count, pl_byte_len))
                 if final_pass:
                     if not posts_file or not idx_file:
                         self.logger.error("Cant find posts or idx file")
@@ -290,7 +283,7 @@ class Indexer:
                         self.logger.error("pii writer dne")
                         raise ValueError("pii writer dne")
                     piiWriter.close()
-                    new_files.append(Path(piiWriter.file_name))
+                    new_files.append(Path(piiFileName))
                 for batch_file in batch:
                     batch_file.close()
                     Path(batch_file.name).unlink(missing_ok=True)
@@ -331,51 +324,6 @@ class Indexer:
         byte_result += token_bytes
         byte_result += U64.pack(idx_offset)
         return byte_result
-
-
-    
-    def merge_posting_lists(self, group, batch):
-        """
-        Returns the byte object of the merged
-        posting lists from the files
-
-        @param group list<tuple<token, batch_idx, pl_count, pl_byte_len>>
-        @param batch list<files>
-        """
-        byte_result = bytearray()
-        for _, index, _, pl_byte_len in group:
-            file = batch[index]
-            byte_result += file.read(pl_byte_len) # guaranteed to not fail since we made the file
-        return byte_result
-
-    def read_token_header(self, file):
-        """
-        Reads the token header in a partial index file.
-        Assumes first byte at cursor is the token byte length
-        returns None if token byte length is 0 or EOF
-        else returns (token, posting_count, byte_len)
-        """
-        b = file.read(U32.size)
-        if len(b) < U32.size:
-            return None
-        token_byte_len, = U32.unpack(b)
-        if token_byte_len == 0:
-            return None
-        token = file.read(token_byte_len).decode("utf-8")
-        pl_posting_count, pl_byte_len = struct.unpack("<II", file.read(8))
-        # file now points at posting bytes, need to read pl_byte_len later
-        return token, pl_posting_count, pl_byte_len 
-
-    def build_token_heap(self, batch):
-        heap = []
-        for idx, file in enumerate(batch):
-            rth_tuple = self.read_token_header(file)
-            if rth_tuple is None:
-                continue
-            token, pl_count, pl_byte_len = rth_tuple
-            heap.append((token, idx, pl_count, pl_byte_len))
-        heapq.heapify(heap) # ordered by (token,idx). No cases where other tuple elements matter
-        return heap
 
     def yield_all_files(self, path: Path):
         for item in path.rglob("*.json"):
