@@ -16,7 +16,7 @@ import logging
 import struct
 
 from search_engine.posting import Posting
-from search_engine.storage.common import pack_str, _Owned, U32
+from search_engine.storage.common import pack_str, _Owned, read_exact, read_struct, try_read_str
 
 PII_POSTS_META = struct.Struct("<II") # posting_count, posting_list_byte_size
 
@@ -77,24 +77,16 @@ class PiiReader(_Owned):
         return piiReader
 
     def _read_token_header(self):
-        b = self.pii_file.read(U32.size)
-        if not b: # clean EOF
+        token = try_read_str(self.pii_file, "pii token")
+        if token is None: # clean EOF
             return None
-        token_bytes = self._read_exact_len(U32.unpack(b)[0] if len(b) == U32.size else -1)
-        token = token_bytes.decode("utf-8")
         if not token:
             self.logger.error("No token was read")
             raise ValueError("No token was read")
-        pl_posting_count, pl_byte_len = PII_POSTS_META.unpack(self._read_exact_len(PII_POSTS_META.size))
+        pl_posting_count, pl_byte_len = read_struct(self.pii_file, PII_POSTS_META, f"pii meta for {token!r}")
 
         # file now points at posting bytes, need to read pl_byte_len later
-        return token, pl_posting_count, pl_byte_len 
-
-    def _read_exact_len(self, n):
-        data = self.pii_file.read(n) if n >= 0 else b""
-        if len(data) != n:
-            raise ValueError(f"{self.file_name or "<stream>"}: truncated .pii (wanted {n} bytes, got {len(data)})")
-        return data
+        return token, pl_posting_count, pl_byte_len
 
     def __iter__(self):
         """
@@ -102,4 +94,4 @@ class PiiReader(_Owned):
         """
         while (hdr := self._read_token_header()) is not None:
             token, count, nbytes = hdr
-            yield PiiEntry(token, count, self._read_exact_len(nbytes))
+            yield PiiEntry(token, count, read_exact(self.pii_file, nbytes, f"pii postings for {token!r}"))

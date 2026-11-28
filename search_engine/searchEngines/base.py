@@ -12,9 +12,10 @@ OUT_ROOT_PATH         = "out"
 
 class SearchEngine(ABC):
     def __init__(self, name: str):
-        self.docTableReader = DocTableReader.open(Path(OUT_ROOT_PATH) / name, 
-                                                  name)
-        self.invIndexReader = InvIndexReader()
+        # same location the Indexer writes to: out/<name>/<name>.*
+        out_dir = Path(OUT_ROOT_PATH) / name
+        self.docTableReader = DocTableReader.open(out_dir, name)
+        self.invIndexReader = InvIndexReader.open(out_dir, name)
 
     """
     Searches on inverted index, returning the top_k results

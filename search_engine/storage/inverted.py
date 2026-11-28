@@ -14,21 +14,31 @@ import logging
 import struct
 from typing import BinaryIO, NamedTuple
 from pathlib import Path
+import pprint
+import time
+import bisect
 
 from search_engine.posting import Posting
-from search_engine.storage.common import pack_str, _Owned, U32, U64
-
-# class IdxEntry(NamedTuple):
-#     token: str
-#     posts_offset: int
-#     postings_byte_size: int
-#     postings_count: int
+from search_engine.storage.common import (
+    pack_str, _Owned, U32, U64,
+    read_exact, read_struct, read_u32, read_u64, read_str, try_read_str,
+)
 
 IDX_POSTS_META = struct.Struct("<QII") # posts_offset, posting_list_byte_size, posting_count
 POSTING_LIST_FEXT     = ".posts"
 INDEX_FEXT            = ".idx" 
 LEXICON_FEXT          = ".lex"
 
+
+class LexEntry(NamedTuple):
+    token: str
+    idx_offset: int
+
+class IdxEntry(NamedTuple):
+    token: str
+    posts_offset: int
+    postings_byte_size: int
+    postings_count: int
 
 # .posts, .idx, .lex
 class InvIndexWriter(_Owned):
@@ -92,4 +102,67 @@ class InvIndexWriter(_Owned):
 
 
 class InvIndexReader(_Owned):
-    pass
+    def __init__(self, posts_file: BinaryIO, idx_file: BinaryIO, lex_file: BinaryIO):
+        self.posts_file, self.idx_file, self.lex_file = posts_file, idx_file, lex_file
+        self._files = (posts_file, idx_file, lex_file)
+        self.lex = [] # list<LexEntry>
+        self.logger = logging.getLogger(f"{self.__class__.__name__}")
+
+    @property
+    def posts_file_name(self):
+        return getattr(self.posts_file, "name", None)
+    @property
+    def idx_file_name(self):
+        return getattr(self.idx_file, "name", None)
+    @property
+    def lex_file_name(self):
+        return getattr(self.lex_file, "name", None)
+
+    @classmethod
+    def open(cls, out_dir: Path, name: str):
+        invIndexReader = cls(
+            open(out_dir / f"{name}{POSTING_LIST_FEXT}", "rb"),
+            open(out_dir / f"{name}{INDEX_FEXT}", "rb"),
+            open(out_dir / f"{name}{LEXICON_FEXT}", "rb")
+        )
+        invIndexReader._owns = True
+        return invIndexReader
+
+    def load_lex(self):
+        """
+        Loads lex file into memory as a list list<tuple<token, idx_offset>>
+        """
+        start_time = time.time()
+        self.lex_file.seek(0)
+        self.lex = []
+        num_tokens = read_u32(self.lex_file, "lex entry_count")
+        for i in range(num_tokens):
+            token = read_str(self.lex_file, f"lex entry {i} token")
+            idx_offset = read_u64(self.lex_file, f"lex entry {i} idx_offset")
+            self.lex.append(LexEntry(token, idx_offset))
+        load_lex_time = time.time() - start_time
+        self.logger.debug(f"Loaded {num_tokens} entries from {self.lex_file_name} in {load_lex_time:.5f} seconds")
+        # pprint.pprint(self.lex)
+
+    def idx_lookup(self, target_token: str) -> IdxEntry | None:
+        """
+        Gets the corresponding IdxEntry of token from the .idx file
+        """
+        index = bisect.bisect_right(self.lex, target_token, key=lambda e: e.token) - 1
+        if index < 0:
+            return None
+        lex_entry = self.lex[index]
+
+        self.idx_file.seek(lex_entry.idx_offset)
+        i = 0
+        while (token := try_read_str(self.idx_file, f"idx entry {i} token")) is not None:
+            po, pbs, pc = read_struct(
+                self.idx_file, IDX_POSTS_META, f"idx entry {i} meta posts data")
+            if token == target_token:
+                return IdxEntry(token, po, pbs, pc)
+            if token > target_token:
+                break
+            i += 1
+            
+        self.logger.debug(f"Token {target_token} does not exist in index")
+        return None

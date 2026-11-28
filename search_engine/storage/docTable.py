@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
-from search_engine.storage.common import _Owned
+from search_engine.storage.common import _Owned, read_exact, read_struct
 
 DOC_RECORD = struct.Struct("<QII") # url_offset, url_len, token_count
 URLS_FEXT  = ".urls"
@@ -98,7 +98,7 @@ class DocTableReader(_Owned):
     def url(self, docid: int) -> str:
         url_offset, url_len, _ = self._read_docs_record(docid)
         self.urls_file.seek(url_offset)
-        return self._read_exact_len(self.urls_file, url_len).decode("utf-8")
+        return read_exact(self.urls_file, url_len, f"url for docid {docid}").decode("utf-8")
 
     def token_count(self, docid: int) -> int:
         """
@@ -109,7 +109,7 @@ class DocTableReader(_Owned):
     def get(self, docid: int) -> DocEntry:
         url_offset, url_len, token_count = self._read_docs_record(docid)
         self.urls_file.seek(url_offset)
-        url = self._read_exact_len(self.urls_file, url_len).decode("utf-8")
+        url = read_exact(self.urls_file, url_len, f"url for docid {docid}").decode("utf-8")
         return DocEntry(url, token_count)
 
     def __len__(self) -> int:
@@ -122,13 +122,7 @@ class DocTableReader(_Owned):
         if not 0 <= docid < self._n:
             raise IndexError(f"docid {docid} out of range [0, {self._n})")
         self.docs_file.seek(docid * DOC_RECORD.size)
-        return DOC_RECORD.unpack(self._read_exact_len(self.docs_file, DOC_RECORD.size))
-
-    def _read_exact_len(self, f: BinaryIO, n: int) -> bytes:
-        data = f.read(n)
-        if len(data) != n:
-            raise ValueError(f"{getattr(f, "name", "<stream>")}: truncated (wanted {n} bytes, got {len(data)})")
-        return data
+        return read_struct(self.docs_file, DOC_RECORD, f"doc record {docid}")
 
     def __getitem__(self, docid: int) -> DocEntry:
         return self.get(docid)
